@@ -437,7 +437,7 @@ async def load_behavior(message, check=None):
         behavior = [{"role": "user", "content": behavior_str}]
     else:
         behavior = load_prompt(filename)
-        convo_str = de_json(behavior)
+        behavior_str = de_json(behavior)
 
     channel_messages[message.channel.id] = behavior
     behavior_name = filename
@@ -448,7 +448,7 @@ async def load_behavior(message, check=None):
 
     embed = discord.Embed(title=f"Behavior loaded: {filename}", description="", color=0x00ff00)
     await message.channel.send(embed=embed)
-    print(f"{Fore.RED}Behavior Loaded:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{convo_str}{Style.RESET_ALL}")
+    print(f"{Fore.RED}Behavior Loaded:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{behavior_str}{Style.RESET_ALL}")
 
 
 
