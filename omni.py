@@ -8,7 +8,8 @@ import json
 import logging
 import openai
 import os
-from imaginepy import AsyncImagine
+import base64
+import replicate
 
 
 logging.basicConfig(filename='error_log.txt', level=logging.ERROR, format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
@@ -22,12 +23,11 @@ ignored_ids = os.getenv("IGNORED_IDS").split(",")
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 allow_commands = os.getenv("ALLOW_COMMANDS").lower() == "true"
 admin_id = os.getenv("ADMIN_IDS").split(",")
-behavior_name = os.getenv('DEFAULT_PROMPT')
+behavior_name = os.getenv('DEFAULT_BEHAVIOR')
 temperature = float(os.getenv("TEMPERATURE"))
 frequency_penalty = float(os.getenv("FREQUENCY_PENALTY"))
 presence_penalty = float(os.getenv("PRESENCE_PENALTY"))
 top_p = float(os.getenv("TOP_P"))
-imagine = AsyncImagine()
 
 
 
@@ -159,7 +159,8 @@ async def get_chat_response(model, messages, max_tokens):
         openai.ChatCompletion.create,
         model=model,
         messages=messages,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        temperature=0.5
     )
     return response
 
@@ -241,35 +242,64 @@ async def discord_chunker(message, content):
 
 
 async def handle_image(attachment, image_prompt=None):
+    system_prompt = f"You are an AI that takes the output from a text to image model and transforms it into a grammatically correct sentence."
+    model = "chat-bison-001"
+    messages = []
     if image_prompt is not None:
         image_response = await image_question(image_prompt, attachment)
+        prompt = f"Image Question: {image_prompt}\nAnswer: {image_response}\nResponse:"
     else:
         image_response = await image_caption(attachment)
-    return image_response
-
-def is_image(filename):
-    return filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif", ".bmp'))
-
+        prompt = f"Image Caption: {image_response}\n'Response:"
+    max_retries = 3
+    backoff_factor = 2
+    for retry_attempt in range(max_retries):
+        try:
+            response = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                max_tokens=256,
+                top_p=top_p,
+                temperature=0.3,
+            )
+            content = response['choices'][0]['message']['content']
+            num_tokens_data = await get_tokens(api_key, model, messages)
+            num_tokens = num_tokens_data['string']['count']
+            print(content)
+            return content, num_tokens
+        
+        except aiohttp.ClientConnectorError:
+            if retry_attempt == max_retries - 1:
+                raise
+            sleep_time = (backoff_factor ** retry_attempt) + 1
+            print(f"Rate limited. Retrying in {sleep_time} seconds...")
+            await asyncio.sleep(sleep_time)
 
 
 async def image_question(prompt, attachment):
     image_data = await attachment.read()
-    caption = await imagine.interrogator(image_data)
-    print(f"{Fore.YELLOW}Interrogator caption: {caption}{Style.RESET_ALL}")
-    prompt_text = f"A user is asking a question about an image. This is their question: {prompt}\nThis is the raw output caption from an image to text model:\n`{caption}`\n Using this data returned from that model, attempt to answer the user's question in a complete sentence. Don't assume who made the image, and only mention 'in the style of' if artists are mentioned. The caption will be raw and contain multiple answers. The first block of information is the most accurate description:"
-    response = await get_completion(prompt_text)
-    await imagine.close()
-    return response
-
+    image_base64 = base64.b64encode(image_data).decode("utf-8")
+    image_data_url = f"data:image/jpeg;base64,{image_base64}"
+    output = await asyncio.to_thread(
+        replicate.run,
+        "andreasjansson/blip-2:4b32258c42e9efd4288bb9910bc532a69727f9acd26aa08e175713a0a857a608",
+        input={"image": image_data_url, "question": prompt},
+    )
+    print(f"{Style.BRIGHT}{Fore.YELLOW}Image query: {prompt}\nBLIP-2 answer: {output}{Style.RESET_ALL}")
+    return output
 
 async def image_caption(attachment):
     image_data = await attachment.read()
-    caption = await imagine.interrogator(image_data)
-    print(f"{Fore.YELLOW}Interrogator caption: {caption}{Style.RESET_ALL}")
-    prompt_text = f"The following text is the raw output from an image to text model. Using this text, attempt to describe the image it represents in a complete sentence. Don't assume who made the image, and only mention 'in the style of' if artists are mentioned. The first block of information is the most accurate description:\n`{caption}`"
-    response = await get_completion(prompt_text)
-    await imagine.close()
-    return response
+    image_base64 = base64.b64encode(image_data).decode("utf-8")
+    image_data_url = f"data:image/jpeg;base64,{image_base64}"
+    output = await asyncio.to_thread(
+        replicate.run,
+        "andreasjansson/blip-2:4b32258c42e9efd4288bb9910bc532a69727f9acd26aa08e175713a0a857a608",
+        input={"image": image_data_url, "caption": True},
+    )
+    print(f"{Style.BRIGHT}{Fore.YELLOW}BLIP-2 Caption: {output}")
+    return output
 
 
 async def get_completion(prompt):
@@ -342,7 +372,7 @@ async def reset(message):
     global behavior_name
     user_channel_key = message.channel.id
 
-    behavior_name = os.getenv("DEFAULT_PROMPT")
+    behavior_name = os.getenv("DEFAULT_BEHAVIOR")
     default_model = os.getenv("DEFAULT_MODEL")
 
     if 'claude' in default_model:
@@ -355,7 +385,7 @@ async def reset(message):
     with open('channel_settings.json', 'r') as f:
         channel_settings = json.load(f)
 
-    channel_settings[str(message.channel.id)]["behavior"] = os.getenv("DEFAULT_PROMPT")
+    channel_settings[str(message.channel.id)]["behavior"] = os.getenv("DEFAULT_BEHAVIOR")
     channel_settings[str(message.channel.id)]["model"] = os.getenv("DEFAULT_MODEL")
 
     with open('channel_settings.json', 'w') as f:
@@ -626,9 +656,9 @@ async def on_message(message):
     messages = channel_messages.get(user_channel_key)
     if messages is None:
         if 'claude' in channel_settings[str(message.channel.id)]["model"]:
-            messages = [{"role": "user", "content": load_prompt_claude(os.getenv("DEFAULT_PROMPT"))}]
+            messages = [{"role": "user", "content": load_prompt_claude(os.getenv("DEFAULT_BEHAVIOR"))}]
         else:
-            messages = load_prompt(filename=os.getenv("DEFAULT_PROMPT"))
+            messages = load_prompt(filename=os.getenv("DEFAULT_BEHAVIOR"))
         channel_messages[user_channel_key] = messages
 
     attachment = message.attachments[0] if message.attachments else None
@@ -656,6 +686,8 @@ async def on_message(message):
 
     async with message_queue_locks[user_channel_key]:
         async with message.channel.typing():
+            _, max_tokens = channel_models[message.channel.id]  # Retrieve max_tokens
+            remaining_tokens = max_tokens  # Initialize remaining_tokens
             if 'claude' in channel_settings[str(message.channel.id)]["model"]:
                 messages.append({"role": "user", "content": "name, " + message.author.nick.capitalize() + ": " + message_content + "\n\nAssistant: "})
             else:
@@ -664,7 +696,8 @@ async def on_message(message):
             for i in range(max_retries):
                 try:
                     if attachment:
-                        content = await handle_image(attachment, image_prompt)
+                        content, num_tokens = await handle_image(attachment, image_prompt)
+                        remaining_tokens -= num_tokens
                     else:
                         response, messages, remaining_tokens = await chat_response(messages, message.channel.id)
                         if response is None:
@@ -676,7 +709,7 @@ async def on_message(message):
                     else:
                         messages.append({"role": "assistant", "content": content})
 
-                    print(f"{Style.DIM}{Fore.WHITE}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}\nCurrent Memory:{messages}")
+                    print(f"{Style.DIM}{Fore.RED}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}\nCurrent Memory:{messages}")
                     print(f"Channel: {message.channel.name}\n{Style.DIM}{Fore.RED}{Back.WHITE}{message.author}: {Fore.BLACK}{message_content}{Style.RESET_ALL}\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{bot.user}: {Fore.BLACK}{content}{Style.RESET_ALL}")
                     
                     responses[message.id] = content
