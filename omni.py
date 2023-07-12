@@ -132,7 +132,6 @@ async def get_models():
                 with open(models_path, 'w') as outfile:
                     json.dump(all_models, outfile, indent=4)
                 chat_models = [m for m in all_models.get("data", []) if "/v1/chat/completions" in m.get("endpoints", [])]
-                chat_models = [m for m in chat_models if m["id"] != "bard"] # bard not yet functional, comment or remove this line when available
                 model_info = {}
                 for model in chat_models:
                     model_id = model["id"]
@@ -190,8 +189,7 @@ async def chat_response(messages, channel_id):
     else:
         if remaining_tokens / max_tokens >= 0.2:
             response = await get_chat_response(model, messages, max_tokens)
-            #print(f"{Style.DIM}{Fore.WHITE}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}")
-        #print(f"Current Memory:{messages}")
+
     return response, messages, remaining_tokens
 
 
@@ -467,7 +465,7 @@ async def load_behavior(message, check=None):
         behavior = [{"role": "user", "content": behavior_str}]
     else:
         behavior = load_prompt(filename)
-        convo_str = de_json(behavior)
+        behavior_str = de_json(behavior)
 
     channel_messages[message.channel.id] = behavior
     behavior_name = filename
@@ -478,8 +476,7 @@ async def load_behavior(message, check=None):
 
     embed = discord.Embed(title=f"Behavior loaded: {filename}", description="", color=0x00ff00)
     await message.channel.send(embed=embed)
-    print(f"{Fore.RED}Behavior Loaded:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{convo_str}{Style.RESET_ALL}")
-
+    print(f"{Fore.RED}Behavior Loaded:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{behavior_str}{Style.RESET_ALL}")
 
 
 
@@ -722,27 +719,19 @@ async def on_message(message):
 
                 except openai.error.APIError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i < max_retries - 1:
-                        await asyncio.sleep(2 ** i)
-                    else:
-                        await message.channel.send("Say again?.")
 
                 except aiohttp.ContentTypeError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i < max_retries - 1:
-                        await asyncio.sleep(2 ** i)
-                    else:
-                        await message.channel.send("Sorry, what was that?")
+
                 except aiohttp.ClientConnectorError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i == max_retries - 1:
-                        await message.channel.send("Huh?")
+
                 except Exception as e:
                     print(type(e), e)
 
             else:
                 logging.error(f"{message.author.name}|{message.channel.name}", exc_info=True)
-                await message.channel.send("Sorry, there was an error processing your message.")
+                await message.channel.send("I'm unable to respond right now, I'll be back!")
 
 
 
