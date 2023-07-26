@@ -599,22 +599,23 @@ async def on_ready():
     invite_link = discord.utils.oauth_url(bot.user.id, permissions=discord.Permissions(), scopes=("bot", "applications.commands"))
     print(f"{Fore.GREEN}Invite: {Style.BRIGHT}{invite_link}{Style.RESET_ALL}")
 
+    if not os.path.exists('channel_settings.json'):
+        with open('channel_settings.json', 'w') as json_file:
+            json.dump({}, json_file)
+
     models_path = 'models.json'
     model_info = {}
 
-    if os.path.exists(models_path):
-        try:
-            with open(models_path, 'r') as f:
-                all_models = json.load(f)
-                chat_models = [m for m in all_models.get("data", []) if "/api/v1/chat/completions" in m.get("endpoints", [])]
-                for model in chat_models:
-                    model_id = model["id"]
-                    tokens = model["tokens"]
-                    model_info[model_id] = tokens
-                model_list_json = list(model_info.keys())
-        except:
-            model_info = await get_models()
-    else:
+    try:
+        with open(models_path, 'r') as f:
+            all_models = json.load(f)
+            chat_models = [m for m in all_models.get("data", []) if "/api/v1/chat/completions" in m.get("endpoints", [])]
+            for model in chat_models:
+                model_id = model["id"]
+                tokens = model["tokens"]
+                model_info[model_id] = tokens
+            model_list_json = list(model_info.keys())
+    except:
         model_info = await get_models()
 
     with open('channel_settings.json', 'r') as f:
@@ -640,7 +641,6 @@ async def on_ready():
             print(f"Error loading prompt file {filename} for channel {channel_id}. Error: {e}")
 
     print(f"{Fore.BLUE}{Style.BRIGHT}Defaults loaded.{Style.RESET_ALL}")
-
 
 
 @bot.event
