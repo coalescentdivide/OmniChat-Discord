@@ -1,15 +1,19 @@
 import asyncio
-import aiohttp
-from colorama import Fore, Back, Style
-import discord
-from discord.ext import commands
-from dotenv import load_dotenv
+import base64
+import io
 import json
 import logging
-import openai
 import os
-from imaginepy import AsyncImagine
 
+import aiohttp
+import discord
+import openai
+from imaginepy import AsyncImagine
+from colorama import Back, Fore, Style
+from discord.ext import commands
+from dotenv import load_dotenv
+from PyPDF2 import PdfReader
+import tiktoken
 
 logging.basicConfig(filename='error_log.txt', level=logging.ERROR, format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
 
@@ -22,13 +26,8 @@ ignored_ids = os.getenv("IGNORED_IDS").split(",")
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 allow_commands = os.getenv("ALLOW_COMMANDS").lower() == "true"
 admin_id = os.getenv("ADMIN_IDS").split(",")
-behavior_name = os.getenv('DEFAULT_PROMPT')
-temperature = float(os.getenv("TEMPERATURE"))
-frequency_penalty = float(os.getenv("FREQUENCY_PENALTY"))
-presence_penalty = float(os.getenv("PRESENCE_PENALTY"))
-top_p = float(os.getenv("TOP_P"))
+behavior_name = os.getenv('DEFAULT_BEHAVIOR')
 imagine = AsyncImagine()
-
 
 
 channel_messages = {}
@@ -47,6 +46,7 @@ def allowed_command(user_id):
     else:
         return False
 
+
 def list_prompts():
     """Lists prompt filenames in "./prompts" directory with ".txt" extension, removes extension, and returns modified names"""    
     behavior_files = []
@@ -54,6 +54,7 @@ def list_prompts():
         if filename.endswith(".txt"):
             behavior_files.append(os.path.splitext(filename)[0])
     return behavior_files
+
 
 def load_prompt(filename):
     """Loads a prompt from a file, processes it, and returns JSON data as a Python object."""   
@@ -63,6 +64,7 @@ def load_prompt(filename):
         lines = file.readlines()
     return json.loads(build_convo(lines))
 
+
 def load_prompt_claude(filename):
     """Loads a prompt from a file, processes it, and returns a single string."""   
     if not filename.endswith(".txt"):
@@ -70,6 +72,7 @@ def load_prompt_claude(filename):
     with open(f"./prompts/{filename}", encoding="utf-8") as file:
         prompt = file.readlines()
     return "\n\n".join(prompt)
+
 
 def save_convo(messages, filename, channel_id):
     """Saves the current memory to a text file"""
@@ -79,9 +82,11 @@ def save_convo(messages, filename, channel_id):
         print(f"{Fore.RED}Behavior Saved:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{convo_str}{Style.RESET_ALL}")
     return f"Behavior saved as `{os.path.splitext(os.path.basename(filename))[0]}`"
 
+
 def set_model(model_name, model_info, channel_id, message=None):
     max_tokens = int(model_info[model_name] * 0.8)
     channel_models[channel_id] = (model_name, max_tokens)
+
 
 def de_json(convo):
     """Convert a conversation from JSON to human-readable text."""
@@ -91,6 +96,7 @@ def de_json(convo):
         content = message['content']
         conversation.append(f"{role}: {content}")
     return "\n".join(conversation)
+
 
 def build_convo(lines):
     """Converts a conversation in text format to JSON format."""
@@ -115,6 +121,34 @@ def build_convo(lines):
     return json.dumps(conversation)
 
 
+def num_tokens_from_message(messages, model="gpt-4"):
+    """Returns the number of tokens used by a list of messages."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    if model == model:  # note: future models may deviate from this
+        num_tokens = 0
+        for message in messages:
+            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                num_tokens += len(encoding.encode(value))
+                if key == "name":  # if there's a name, the role is omitted
+                    num_tokens += -1  # role is always required and always 1 token
+        num_tokens += 2  # every reply is primed with <im_start>assistant
+        return num_tokens
+
+
+async def get_tokens(api_key: str, model: str, messages: list):
+    headers = {'Authorization': f"Bearer {api_key}"}
+    json_data = {'model': model, 'messages': messages}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.post(f"{api_base}/chat/tokenizer", json=json_data) as resp:            
+            response = await resp.json()
+            #print(response)
+            return response
+        
+
 async def forget_mentions(user_channel_key):
     await asyncio.sleep(300)
     if user_channel_key in channel_messages:
@@ -131,8 +165,7 @@ async def get_models():
                 all_models = await response.json()
                 with open(models_path, 'w') as outfile:
                     json.dump(all_models, outfile, indent=4)
-                chat_models = [m for m in all_models.get("data", []) if "/v1/chat/completions" in m.get("endpoints", [])]
-                chat_models = [m for m in chat_models if m["id"] != "bard"] # bard not yet functional, comment or remove this line when available
+                chat_models = [m for m in all_models.get("data", []) if "/api/v1/chat/completions" in m.get("endpoints", [])]
                 model_info = {}
                 for model in chat_models:
                     model_id = model["id"]
@@ -144,30 +177,23 @@ async def get_models():
                 return []
 
 
-async def get_tokens(api_key: str, model: str, messages: list):
-    headers = {'Authorization': f"Bearer {api_key}"}
-    json_data = {'model': model, 'messages': messages}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.post(f"{api_base}/chat/tokenizer", json=json_data) as resp:            
-            response = await resp.json()
-            #print(response)
-            return response
-
-
 async def get_chat_response(model, messages, max_tokens):   
     response = await asyncio.to_thread(
         openai.ChatCompletion.create,
         model=model,
         messages=messages,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        temperature=0.5
     )
     return response
 
 
 async def chat_response(messages, channel_id):
     model, max_tokens = channel_models[channel_id]
-    num_tokens_data = await get_tokens(api_key, model, messages)
-    num_tokens = num_tokens_data['string']['count']
+    #num_tokens_data = await get_tokens(api_key, model, messages)
+    #print(num_tokens_data)
+    #num_tokens = num_tokens_data['string']['count']
+    num_tokens = num_tokens_from_message(messages)
     remaining_tokens = max_tokens - num_tokens
 
     with open('channel_settings.json', 'r') as f:
@@ -181,27 +207,27 @@ async def chat_response(messages, channel_id):
         behavior_len = 1
     start_index = behavior_len
     while remaining_tokens / max_tokens < 0.2 and len(messages) > behavior_len:
-        oldest_tokens_data = await get_tokens(api_key, model, messages[start_index:start_index+1])
-        oldest_tokens = oldest_tokens_data['string']['count']
+        #oldest_tokens_data = await get_tokens(api_key, model, messages[start_index:start_index+1])
+        #oldest_tokens = oldest_tokens_data['string']['count']
+        oldest_tokens = num_tokens_from_message(messages[start_index:start_index+1])
         messages = messages[:start_index] + messages[start_index+1:]
         num_tokens -= oldest_tokens
         remaining_tokens = max_tokens - num_tokens
     else:
         if remaining_tokens / max_tokens >= 0.2:
             response = await get_chat_response(model, messages, max_tokens)
-            #print(f"{Style.DIM}{Fore.WHITE}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}")
-        #print(f"Current Memory:{messages}")
+
     return response, messages, remaining_tokens
 
 
 async def discord_chunker(message, content):
-    """Seamless text and code splitter for Discord."""
+    """(Almost) Seamless text and code splitter for Discord."""
     async def send_chunk(chunk):
         await message.channel.send(chunk)
 
     def find_split_index(content, max_length):
         indices = [
-            content.rfind('\n\n', 0, max_length),
+            content.rfind('\u200b', 0, max_length),
             content.rfind('\n', 0, max_length),
             content.rfind('. ', 0, max_length),
             content.rfind(' ', 0, max_length)
@@ -224,7 +250,10 @@ async def discord_chunker(message, content):
                 else:
                     code_block_lang = ""
                 in_code_block = not in_code_block
+
             if len(chunk) + len(line) > max_chunk_length:
+                chunk = chunk.replace('\n\n', '\n\u200b\n')
+
                 if in_code_block:
                     split_index = find_split_index(chunk, max_chunk_length - 4)
                     chunks.append(chunk[:split_index].rstrip() + "```")
@@ -241,15 +270,47 @@ async def discord_chunker(message, content):
 
 
 async def handle_image(attachment, image_prompt=None):
+    system_prompt = f"You are an AI that takes the output from a text to image model and transforms it into a grammatically correct sentence. Sometimes the output will be repeating information, if so then you only need say it once."
+    model = "gpt-3.5-turbo"
+    messages = []
+    if image_prompt is not None:
+        image_response = await image_question(image_prompt, attachment)
+        prompt = f"Image Question: {image_prompt}\nAnswer: {image_response}\nResponse:"
+    else:
+        image_response = await image_caption(attachment)
+        prompt = f"Image Caption: {image_response}\n'Response:"
+    max_retries = 3
+    backoff_factor = 2
+    for retry_attempt in range(max_retries):
+        try:
+            response = await asyncio.to_thread(
+                openai.ChatCompletion.create,
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                max_tokens=256,
+                temperature=0.3,
+            )
+            content = response['choices'][0]['message']['content']
+            #num_tokens_data = await get_tokens(api_key, model, messages)
+            #num_tokens = num_tokens_data['string']['count']
+            num_tokens = num_tokens_from_message(messages)
+            print(content)
+            return content, num_tokens
+        
+        except aiohttp.ClientConnectorError:
+            if retry_attempt == max_retries - 1:
+                raise
+            sleep_time = (backoff_factor ** retry_attempt) + 1
+            print(f"Rate limited. Retrying in {sleep_time} seconds...")
+            await asyncio.sleep(sleep_time)
+
+
+async def handle_image(attachment, image_prompt=None):
     if image_prompt is not None:
         image_response = await image_question(image_prompt, attachment)
     else:
-        image_response = await image_caption(attachment)
+        image_response = await image_caption(attachment)    
     return image_response
-
-def is_image(filename):
-    return filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif", ".bmp'))
-
 
 
 async def image_question(prompt, attachment):
@@ -282,10 +343,7 @@ async def get_completion(prompt):
                 model="text-davinci-003",
                 prompt=prompt,
                 max_tokens=256,
-                top_p=top_p,
                 temperature=0.5,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty
             )
             content = response['choices'][0]['text']
             return content.strip()
@@ -300,14 +358,20 @@ async def get_completion(prompt):
 # Command Functions
 
 async def help(message):
-    embed = discord.Embed(title=f"Send a message in this channel to get a response from {message.guild.me.nick}\nReplies to other users or messages that start with ! are ignored", color=0x00ff00)
-    embed.add_field(name="load model", value=f"Choose from a list of chat models to converse with", inline=False)
-    embed.add_field(name="wipe memory", value=f"Wipes the short-term memory and reloads the current behavior", inline=False)
-    embed.add_field(name="new behavior", value=f"Allows the user to set a new behavior to the current memory", inline=False)
-    embed.add_field(name="save behavior", value=f"Saves the current memory as a behavior template", inline=False)
-    embed.add_field(name="load behavior [behavior name]", value=f"Wipes memory and loads the specified behavior template. If no filename is provided, a list of available behavior templates will be shown. Then respond with the name of the template you wish to load.", inline=False)
-    embed.add_field(name="reset", value=f"Wipes memory and loads the default behavior", inline=False)
-    embed.add_field(name="@mention", value=f"You can also mention {message.guild.me.nick} outside of this channel. Keep mentioning it to continue that conversation, otherwise a mention convo is erased automatically after 5 minutes", inline=False)
+    embed = discord.Embed(
+        title=f"Send a message in this channel to get a response from {message.guild.me.nick}\n\nReplies to other users or messages that start with ! are ignored", color=0x00ff00)
+    embed.add_field(name="@mention", value=f"You can mention {message.guild.me.nick} to converse in an inactive channel. This convo is erased automatically after 5 minutes", inline=False)
+    
+    if allowed_command(message.author.id):
+        # Additional fields for admin users
+        embed.add_field(name="toggle active", value=f"Turn on or off {message.guild.me.nick} responses for this channel", inline=False)
+        embed.add_field(name="load model", value=f"Choose from a list of chat models to converse with", inline=False)
+        embed.add_field(name="wipe memory", value=f"Wipes the short-term memory and reloads the current behavior", inline=False)
+        embed.add_field(name="new behavior", value=f"Allows the user to set a new behavior to the current memory", inline=False)
+        embed.add_field(name="save behavior", value=f"Saves the current memory as a behavior template", inline=False)
+        embed.add_field(name="load behavior [behavior name]", value=f"Wipes memory and loads the specified behavior template. If no filename is provided, a list of available behavior templates will be shown. Then respond with the name of the template you wish to load.", inline=False)
+        embed.add_field(name="reset", value=f"Wipes memory and loads the default behavior", inline=False)
+
     await message.channel.send(embed=embed)
     return
 
@@ -342,7 +406,7 @@ async def reset(message):
     global behavior_name
     user_channel_key = message.channel.id
 
-    behavior_name = os.getenv("DEFAULT_PROMPT")
+    behavior_name = os.getenv("DEFAULT_BEHAVIOR")
     default_model = os.getenv("DEFAULT_MODEL")
 
     if 'claude' in default_model:
@@ -355,7 +419,7 @@ async def reset(message):
     with open('channel_settings.json', 'r') as f:
         channel_settings = json.load(f)
 
-    channel_settings[str(message.channel.id)]["behavior"] = os.getenv("DEFAULT_PROMPT")
+    channel_settings[str(message.channel.id)]["behavior"] = os.getenv("DEFAULT_BEHAVIOR")
     channel_settings[str(message.channel.id)]["model"] = os.getenv("DEFAULT_MODEL")
 
     with open('channel_settings.json', 'w') as f:
@@ -451,8 +515,6 @@ async def load_behavior(message, check=None):
     print(f"{Fore.RED}Behavior Loaded:\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{behavior_str}{Style.RESET_ALL}")
 
 
-
-
 async def load_model(message, check):
     if not allowed_command(message.author.id):
         await message.channel.send("You are not allowed to use this command.")
@@ -497,8 +559,6 @@ async def load_model(message, check):
     embed = discord.Embed(title=f"Model loaded: {model_id}", description=f"Max tokens: {model_info[model_id]}", color=0x00ff00)
     await message.channel.send(embed=embed)
     return
-
-
 
 
 async def toggle_active(message):
@@ -546,8 +606,7 @@ async def on_ready():
         try:
             with open(models_path, 'r') as f:
                 all_models = json.load(f)
-                chat_models = [m for m in all_models.get("data", []) if "/v1/chat/completions" in m.get("endpoints", [])]
-                chat_models = [m for m in chat_models if m["id"] != "bard"] # bard not yet functional, comment or remove this line when available
+                chat_models = [m for m in all_models.get("data", []) if "/api/v1/chat/completions" in m.get("endpoints", [])]
                 for model in chat_models:
                     model_id = model["id"]
                     tokens = model["tokens"]
@@ -584,7 +643,6 @@ async def on_ready():
 
 
 
-
 @bot.event
 async def on_message(message):
     global behavior_name
@@ -612,7 +670,8 @@ async def on_message(message):
         return
     
     message_content = message.content.replace(f"{bot.user.mention}", '').strip()
-    if message.reference is not None or message.content.startswith('!'):
+
+    if (message.reference and not message.reference.resolved.attachments) or message.content.startswith('!'):
         return
 
     def check(msg):
@@ -626,9 +685,9 @@ async def on_message(message):
     messages = channel_messages.get(user_channel_key)
     if messages is None:
         if 'claude' in channel_settings[str(message.channel.id)]["model"]:
-            messages = [{"role": "user", "content": load_prompt_claude(os.getenv("DEFAULT_PROMPT"))}]
+            messages = [{"role": "user", "content": load_prompt_claude(os.getenv("DEFAULT_BEHAVIOR"))}]
         else:
-            messages = load_prompt(filename=os.getenv("DEFAULT_PROMPT"))
+            messages = load_prompt(filename=os.getenv("DEFAULT_BEHAVIOR"))
         channel_messages[user_channel_key] = messages
 
     attachment = message.attachments[0] if message.attachments else None
@@ -652,19 +711,75 @@ async def on_message(message):
         if user_channel_key not in message_queue_locks:
             message_queue_locks[user_channel_key] = asyncio.Lock()
         image_prompt = message_content.strip() if attachment and message_content.strip() else None
-       # messages.append({"role": "user", "content": message_content})
+
 
     async with message_queue_locks[user_channel_key]:
         async with message.channel.typing():
-            if 'claude' in channel_settings[str(message.channel.id)]["model"]:
-                messages.append({"role": "user", "content": "name, " + message.author.nick.capitalize() + ": " + message_content + "\n\nAssistant: "})
+
+            _, max_tokens = channel_models[message.channel.id]
+            remaining_tokens = max_tokens
+
+            if message.author.nick is not None:
+                nickname = message.author.nick.split('#')[0].capitalize()
             else:
-                messages.append({"role": "user", "content": "name, " + message.author.nick.capitalize() + ": " + message_content})
+                nickname = message.author.name.split('#')[0].capitalize()
+            if 'claude' in channel_settings[str(message.channel.id)]["model"]:
+                messages.append({"role": "user", "content": "name, " + nickname + ": " + message_content + "\n\n<BEGIN NEW RESPONSE> "})
+            else:
+                messages.append({"role": "user", "content": "name, " + nickname + ": " + message_content})
+
+            if message.reference:
+                original_message = await message.channel.fetch_message(message.reference.message_id)
+                attachment = original_message.attachments[0] if original_message.attachments else None
+
             max_retries = 3
             for i in range(max_retries):
                 try:
+
                     if attachment:
-                        content = await handle_image(attachment, image_prompt)
+                        image_extensions = ('png', 'jpg', 'jpeg', 'gif')
+                        file_extension = attachment.filename.lower().split('.')[-1]
+                        if file_extension in image_extensions:
+                            content = await handle_image(attachment, image_prompt)
+
+                        else:
+                            # Handle text and PDF file attachment
+                            file_content = await attachment.read()
+                            if file_extension == 'pdf':
+                                file_io = io.BytesIO(file_content)
+                                pdf = PdfReader(file_io)
+                                extracted_text = []
+                                for page_num in range(len(pdf.pages)):
+                                    page = pdf.pages[page_num]
+                                    page_text = page.extract_text()
+                                    page_text_with_number = f'Page {page_num + 1}:\n{page_text}'
+                                    extracted_text.append(page_text_with_number)
+                                file_content = "\n".join(extracted_text)
+                                file_content = file_content.encode('utf-8')
+                            message_content_for_file = "Document: " + file_content.decode('utf-8')
+                            query_document = [{"role": "user", "content": message_content + "\n\n" + message_content_for_file}]
+
+                            # Get the token count of the file content
+                            model = channel_settings[str(message.channel.id)]["model"]
+                            if 'claude' in channel_settings[str(message.channel.id)]["model"]:
+                                num_tokens_data = await get_tokens(api_key, model, query_document)
+                                num_tokens_doc = num_tokens_data['string']['count']
+                            else:
+                                num_tokens_doc = num_tokens_from_message(query_document)
+                            print(f"{Fore.YELLOW}Document loaded with token count of:{num_tokens_doc}{Style.RESET_ALL}")
+
+                            # Check if the content exceeds the token limit
+                            max_content_length = remaining_tokens - 500
+                            if num_tokens_doc > max_content_length:
+                                print(f"{Fore.YELLOW}Document too large for current model!{Style.RESET_ALL}") # todo: use vectorstore                                
+                                await message.channel.send("Document too large for current model!")
+                                return
+                               
+                            else:
+                                messages.append({"role": "user", "content": message_content + "\n\n" + message_content_for_file})
+                                response, messages, remaining_tokens = await chat_response(messages, message.channel.id)
+                                content = response['choices'][0]['message']['content']
+
                     else:
                         response, messages, remaining_tokens = await chat_response(messages, message.channel.id)
                         if response is None:
@@ -672,11 +787,11 @@ async def on_message(message):
                             return
                         content = response['choices'][0]['message']['content']
                     if 'claude' in channel_settings[str(message.channel.id)]["model"]:
-                        messages.append({"role": "assistant", "content": content + "\n\nHuman: "})
+                        messages.append({"role": "assistant", "content": content + "\n\n\<END OF RESPONSE>"})
                     else:
                         messages.append({"role": "assistant", "content": content})
 
-                    print(f"{Style.DIM}{Fore.WHITE}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}\nCurrent Memory:{messages}")
+                    print(f"{Style.DIM}{Fore.RED}Remaining tokens:{remaining_tokens}{Style.RESET_ALL}\nCurrent Memory:{messages}")
                     print(f"Channel: {message.channel.name}\n{Style.DIM}{Fore.RED}{Back.WHITE}{message.author}: {Fore.BLACK}{message_content}{Style.RESET_ALL}\n{Style.DIM}{Fore.GREEN}{Back.WHITE}{bot.user}: {Fore.BLACK}{content}{Style.RESET_ALL}")
                     
                     responses[message.id] = content
@@ -689,28 +804,19 @@ async def on_message(message):
 
                 except openai.error.APIError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i < max_retries - 1:
-                        await asyncio.sleep(2 ** i)
-                    else:
-                        await message.channel.send("Say again?.")
 
                 except aiohttp.ContentTypeError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i < max_retries - 1:
-                        await asyncio.sleep(2 ** i)
-                    else:
-                        await message.channel.send("Sorry, what was that?")
+
                 except aiohttp.ClientConnectorError as e:
                     print(f"Retry {i+1}:", type(e), e)
-                    if i == max_retries - 1:
-                        await message.channel.send("Huh?")
+
                 except Exception as e:
                     print(type(e), e)
 
             else:
                 logging.error(f"{message.author.name}|{message.channel.name}", exc_info=True)
-                await message.channel.send("Sorry, there was an error processing your message.")
-
+                await message.channel.send("I'm unable to respond right now, I'll be back!")
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
