@@ -1,0 +1,7 @@
+colorama
+discord
+openai
+python-dotenv
+PyPDF2
+git+https://github.com/ItsCEED/Imaginepy.git
+tiktoken
