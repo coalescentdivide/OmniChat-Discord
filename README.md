@@ -9,6 +9,7 @@ Built for [Chimeragpt](https://chimeragpt.adventblocks.cc/)
 
 - python environment
 
+- [chimeragpt](https://chimeragpt.adventblocks.cc/) api key
 
 # Installation and usage
 
