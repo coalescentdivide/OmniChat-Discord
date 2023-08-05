@@ -399,20 +399,45 @@ async def new_behavior(message, check):
     if not allowed_command(message.author.id):
         await message.channel.send("You are not allowed to use this command.")
         return
-    
+
     command_mode_flag[message.channel.id] = True
     channel_messages[message.channel.id] = []
     embed = discord.Embed(title=f"Write the new behavior", description=(f"Provide a new behavior. Can be a single prompt, or you can provide an example conversation in the following format:\n\nsystem: a system message\nuser: user message 1\nassistant: example response 1\nuser: user message 2\nassistant: example response 2\n\n"), color=0x00ff00)        
-    embed.set_footer(text=(f"If you wish to recall your new behavior later, don\"t forget to save it by typing `save behavior`"))
+    embed.set_footer(text=(f"If you wish to recall your new behavior later, don't forget to save it by typing `save behavior`"))
     await message.channel.send(embed=embed)
     msg = await bot.wait_for("message", check=check)
-    channel_messages[message.channel.id] = json.loads(build_convo(msg.content.strip().split('\n')))
-    async for m in message.channel.history(limit=1):
-        if m.author == message.author and m.content:
-            last_user_message = m.content
-            break
 
-    embed = discord.Embed(title="New behavior Set!", description=last_user_message, color=0x00ff00)
+    text_attachment_used = False
+
+    if msg.attachments:
+        if msg.attachments[0].filename.endswith('.txt'):
+            try:
+                behavior_text = await msg.attachments[0].read()
+                behavior_text = behavior_text.decode('utf-8')
+                text_attachment_used = True
+            except Exception as e:
+                embed = discord.Embed(title="Failed to read the attachment!", description=str(e), color=0xff0000)
+                await message.channel.send(embed=embed)
+                return
+        else:
+            embed = discord.Embed(title="Unsupported file type!", description="Please attach a .txt file.", color=0xff0000)
+            await message.channel.send(embed=embed)
+            return
+    else:
+        behavior_text = msg.content.strip()
+
+    channel_messages[message.channel.id] = json.loads(build_convo(behavior_text.split('\n')))
+
+    if not text_attachment_used:
+        async for m in message.channel.history(limit=1):
+            if m.author == message.author and m.content:
+                last_user_message = m.content
+                break
+        embed_description = last_user_message
+    else:
+        embed_description = "New behavior Set! Type `save behavior` if you want to keep it!"
+
+    embed = discord.Embed(title="New behavior Set! Type `save behavior` if you want to keep it!", description=embed_description, color=0x00ff00)
     await message.channel.send(embed=embed)
     return
 
