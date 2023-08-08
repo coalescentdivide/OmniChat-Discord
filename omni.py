@@ -554,7 +554,7 @@ async def toggle_active(message):
         channel_settings = json.load(f)
     if str(message.channel.id) not in channel_settings:
         channel_settings[str(message.channel.id)] = {
-            "model": "gpt-4",
+            "model": "gpt-3.5-turbo",
             "behavior": "default",
             "active": False
         }
