@@ -161,8 +161,9 @@ async def get_models():
                 model_info = {}
                 for model in chat_models:
                     model_id = model["id"]
-                    tokens = model["tokens"]
-                    model_info[model_id] = tokens
+                    if 'tokens' in model:
+                        tokens = model["tokens"]
+                        model_info[model_id] = tokens
                 model_list_json = list(model_info.keys())
                 return model_info
             else:
@@ -322,7 +323,7 @@ async def help(message):
     bot_name = message.guild.me.nick or message.guild.me.name
 
     title = f"I'm {bot_name} the chat bot!"
-    footer = f"\n\u200bMade with ❤️ by Trypsky "
+    footer = f"Made with ❤️ by Trypsky "
 
     embed = discord.Embed(
         title=f"{title}", color=0x00ff00
